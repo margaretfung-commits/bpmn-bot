@@ -6,48 +6,58 @@ app.use(express.urlencoded({ extended: true }));
 
 app.post("/slack/bpmn", async (req, res) => {
     const userText = req.body.text;
+    const userId = req.body.user_id;
+    const responseUrl = req.body.response_url;
 
+    // 🔐 1. whitelist check
+    if (!ALLOWED_USERS.includes(userId)) {
+        return res.json({
+            response_type: "ephemeral",
+            text: "⛔ You are not allowed to use this command."
+        });
+    }
+
+    // ⏱️ 2. immediate response (fix Slack timeout)
+    res.json({
+        response_type: "ephemeral",
+        text: "⏳ Generating BPMN diagram..."
+    });
+
+    // ⚡ 3. async Claude call (CHEAP model)
     try {
-        const aiResponse = await axios.post(
-            "https://api.openai.com/v1/chat/completions",
-            {
-                model: "gpt-4o-mini",
-                messages: [
-                    {
-                        role: "system",
-                        content: "You are a BPMN expert. Return ONLY PlantUML code."
-                    },
-                    {
-                        role: "user",
-                        content: `Convert this workflow into BPMN PlantUML:\n${userText}`
-                    }
-                ]
-            },
-            {
-                headers: {
-                    Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
+        const result = await anthropic.messages.create({
+            model: "claude-3-haiku-20240307",
+            max_tokens: 1000,
+            messages: [
+                {
+                    role: "user",
+                    content: `You are a BPMN expert. Return ONLY PlantUML code.\n\nConvert this workflow:\n${userText}`
                 }
-            }
-        );
+            ]
+        });
 
-        const plantuml = aiResponse.data.choices[0].message.content;
+        const plantuml = result.content[0].text;
+
         const encoded = encodeURIComponent(plantuml);
         const imageUrl = `https://www.plantuml.com/plantuml/png/~1${encoded}`;
 
-        res.json({
+        // 📩 send result back to Slack
+        await axios.post(responseUrl, {
             response_type: "in_channel",
             text: "📊 Your BPMN Diagram:",
             attachments: [
-                { image_url: imageUrl },
-                { text: "PlantUML:\n" + plantuml }
+                {
+                    image_url: imageUrl,
+                    text: plantuml
+                }
             ]
         });
 
     } catch (err) {
         console.error(err);
-        res.send("Error");
+
+        await axios.post(responseUrl, {
+            text: "❌ Error generating BPMN diagram"
+        });
     }
 });
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("Running on " + PORT));
