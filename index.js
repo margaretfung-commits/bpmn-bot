@@ -1,5 +1,6 @@
 const express = require("express");
 const axios = require("axios");
+const ALLOWED_USERS = ["U04ERCL1490"];
 
 const app = express();
 app.use(express.urlencoded({ extended: true }));
