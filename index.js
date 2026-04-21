@@ -4,7 +4,6 @@ const Anthropic = require("@anthropic-ai/sdk");
 const pako = require("pako");
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
 const ALLOWED_USERS = ["U04ERCL1490"];
 const app = express();
 app.use(express.urlencoded({ extended: true }));
@@ -27,7 +26,6 @@ function encodePlantUML(text) {
     return result;
 }
 
-// Build a draw.io URL with the PlantUML source embedded as a native PlantUML cell
 function buildDrawioUrl(plantuml) {
     const safe = plantuml
         .replace(/&/g, "&amp;")
@@ -35,7 +33,6 @@ function buildDrawioUrl(plantuml) {
         .replace(/'/g, "&apos;")
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;");
-
     const xml =
         `<mxGraphModel><root>` +
         `<mxCell id="0"/>` +
@@ -46,48 +43,101 @@ function buildDrawioUrl(plantuml) {
         `<mxGeometry x="20" y="20" width="800" height="1100" as="geometry"/>` +
         `</mxCell>` +
         `</root></mxGraphModel>`;
-
     return `https://app.diagrams.net/?splash=0&xml=${encodeURIComponent(xml)}`;
 }
 
-// ─── STEP 1 PROMPT: Extract workflow from messy input ────────────────────────
-// Accepts anything: Slack conversations, bullet points, paragraphs, mixed text.
-// Returns ONLY a clean, structured workflow — no chit-chat, no unrelated content.
-const EXTRACT_PROMPT = `You are a business analyst. Your job is to read the input below — which may be a Slack conversation, meeting notes, bullet points, or a mix of relevant and irrelevant content — and extract ONLY the workflow or process steps described.
+// ── STEP 1: Extract the clean workflow from any raw input ─────────────────────
+const EXTRACT_PROMPT = `You are a business analyst. Read the input below — it may be a Slack conversation, meeting notes, bullet points, or mixed content — and extract ONLY the workflow or process steps.
 
-OUTPUT FORMAT (strict):
+OUTPUT RULES:
 - Return a titled, numbered list of workflow steps
-- Each step must be a clear action (verb + object), e.g. "User submits invoice"
-- Include decision points as: DECISION: <condition> → YES: <action> / NO: <action>
-- Ignore: greetings, reactions, off-topic chat, timestamps, usernames, emoji-only messages, jokes, side discussions
-- If no clear workflow is found, reply with exactly: NO_WORKFLOW_FOUND
-- Do NOT include any explanation, preamble, or markdown — output ONLY the structured workflow list
+- Each step must be a clear action: verb + object, e.g. "User submits invoice"
+- Mark decision points as: DECISION: <condition> → YES: <action> / NO: <action>
+- Mark which actor/system performs each step, e.g. "[SAP] Send master data files"
+- Ignore: greetings, reactions, off-topic chat, timestamps, usernames, emoji-only messages, jokes
+- If NO workflow is found, reply with exactly: NO_WORKFLOW_FOUND
+- Output ONLY the structured list — no explanation, no preamble, no markdown
 
 Input:
 `;
 
-// ─── STEP 2 PROMPT: Convert clean workflow to PlantUML ───────────────────────
-const PLANTUML_PROMPT = `You are a PlantUML expert. Convert the structured workflow below into a PlantUML UML Activity Diagram (beta syntax) — a single vertical flow with decision diamonds and merge points, like a classic flowchart.
+// ── STEP 2: Generate PlantUML — smart style selection ────────────────────────
+const PLANTUML_PROMPT = `You are a PlantUML expert. Convert the structured workflow below into a PlantUML Activity Diagram (beta syntax).
 
-STRICT RULES:
-- Start with @startuml and end with @enduml
-- Add a title using: title <Workflow Title>
-- Add these skinparam lines:
-    skinparam backgroundColor #FEFEFE
-    skinparam activityBackgroundColor #FFFFFF
-    skinparam activityBorderColor #555555
-    skinparam activityDiamondBackgroundColor #FFFFFF
-    skinparam activityDiamondBorderColor #555555
-    skinparam arrowColor #333333
-    skinparam roundcorner 10
-- Use start for the initial filled circle
-- Use stop for the final filled circle
-- Use :Action label; for every process step (ends with semicolon)
-- Use if (condition?) then (Yes) ... else (No) ... endif for decisions
-- Keep the entire flow in ONE single column — NO swimlanes, NO | Actor | syntax
-- Do NOT use sequence diagram syntax
+FIRST, decide which diagram style to use:
+
+USE SWIMLANES when:
+- Two or more distinct actors, systems, or departments are named (e.g. SAP, PO, SIMS, User, Finance)
+- Steps clearly pass between different parties (handoffs exist)
+- Actors are marked with [ActorName] in the workflow
+
+USE SINGLE-FLOW (no swimlanes) when:
+- Only one actor or system performs all steps
+- The workflow is a pure decision/validation logic with no handoffs
+- No distinct parties are named
+
+═══ SWIMLANE SYNTAX (use when multiple actors) ═══
+@startuml
+skinparam swimlaneWidth same
+skinparam backgroundColor #FEFEFE
+skinparam activityBackgroundColor #FFFFFF
+skinparam activityBorderColor #555555
+skinparam activityDiamondBackgroundColor #FFFFFF
+skinparam activityDiamondBorderColor #555555
+skinparam arrowColor #333333
+title <Workflow Title>
+|ActorOne|
+start
+:First action;
+|ActorTwo|
+:Receives and processes;
+if (Condition?) then (Yes)
+  :Handle yes case;
+else (No)
+  |ActorOne|
+  :Handle no case;
+endif
+|ActorTwo|
+:Final step;
+stop
+@enduml
+
+═══ SINGLE-FLOW SYNTAX (use when one actor) ═══
+@startuml
+skinparam backgroundColor #FEFEFE
+skinparam activityBackgroundColor #FFFFFF
+skinparam activityBorderColor #555555
+skinparam activityDiamondBackgroundColor #FFFFFF
+skinparam activityDiamondBorderColor #555555
+skinparam arrowColor #333333
+skinparam roundcorner 10
+title <Workflow Title>
+start
+:First step;
+if (Condition?) then (Yes)
+  :Handle yes;
+else (No)
+  :Handle no;
+  stop
+endif
+:Continue flow;
+stop
+@enduml
+
+═══ SUPPORTED SYNTAX (use where appropriate) ═══
+- :Action label;          → rounded rectangle step (must end with semicolon)
+- if (x?) then (Yes)      → decision diamond
+  else (No) / endif       → branch and merge
+- fork / fork again       → parallel branches
+  end fork                → join parallel branches
+- repeat / repeat while   → loop construct
+- note right: text        → annotation beside a step
+- stop (mid-flow)         → early termination in a branch (e.g. error path)
+
+STRICT OUTPUT RULES:
 - Do NOT wrap output in markdown fences or backticks
-- Output ONLY raw PlantUML code
+- Do NOT include any explanation
+- Output ONLY the raw PlantUML code starting with @startuml
 
 Workflow:
 `;
@@ -97,7 +147,6 @@ app.post("/slack/bpmn", async (req, res) => {
     const userId = req.body.user_id;
     const responseUrl = req.body.response_url;
 
-    // 1. Whitelist check
     if (!ALLOWED_USERS.includes(userId)) {
         return res.json({
             response_type: "ephemeral",
@@ -105,14 +154,13 @@ app.post("/slack/bpmn", async (req, res) => {
         });
     }
 
-    // 2. Immediate ACK to avoid Slack 3s timeout
     res.json({
         response_type: "ephemeral",
         text: "⏳ Analysing input and generating diagram..."
     });
 
     try {
-        // ── STEP 1: Extract the workflow from raw input ──────────────────────
+        // ── STEP 1: Extract workflow ──────────────────────────────────────────
         const extractResult = await anthropic.messages.create({
             model: "claude-haiku-4-5-20251001",
             max_tokens: 1000,
@@ -121,16 +169,15 @@ app.post("/slack/bpmn", async (req, res) => {
 
         const extractedWorkflow = extractResult.content[0].text.trim();
 
-        // If no workflow found, tell the user clearly
         if (extractedWorkflow === "NO_WORKFLOW_FOUND") {
             await axios.post(responseUrl, {
                 response_type: "ephemeral",
-                text: "⚠️ I couldn't find a workflow in your input. Please describe the process steps you want to diagram, e.g.:\n> `/bpmn User submits invoice → Finance reviews → Approved? Yes: pay / No: reject`"
+                text: "⚠️ I couldn't find a workflow in your input. Try:\n> `/bpmn User submits invoice → Finance reviews → Approved? Yes: pay / No: reject`"
             });
             return;
         }
 
-        // ── STEP 2: Generate PlantUML from clean workflow ────────────────────
+        // ── STEP 2: Generate PlantUML (auto-selects swimlane vs single-flow) ──
         const plantUmlResult = await anthropic.messages.create({
             model: "claude-haiku-4-5-20251001",
             max_tokens: 2000,
@@ -143,12 +190,10 @@ app.post("/slack/bpmn", async (req, res) => {
             .replace(/```\s*$/i, "")
             .trim();
 
-        // ── Build URLs ───────────────────────────────────────────────────────
         const encoded = encodePlantUML(plantuml);
         const imageUrl = `https://www.plantuml.com/plantuml/png/${encoded}`;
         const drawioUrl = buildDrawioUrl(plantuml);
 
-        // ── Send result to Slack ─────────────────────────────────────────────
         await axios.post(responseUrl, {
             response_type: "in_channel",
             blocks: [
@@ -159,9 +204,7 @@ app.post("/slack/bpmn", async (req, res) => {
                         text: "*📋 Extracted workflow:*\n```" + extractedWorkflow + "```"
                     }
                 },
-                {
-                    type: "divider"
-                },
+                { type: "divider" },
                 {
                     type: "section",
                     text: { type: "mrkdwn", text: "*📊 Activity Diagram:*" }
