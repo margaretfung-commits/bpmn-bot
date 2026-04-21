@@ -27,15 +27,8 @@ function encodePlantUML(text) {
     return result;
 }
 
-// Build a draw.io URL that pre-loads the diagram.
-//
-// How draw.io PlantUML embedding works:
-//   draw.io has a native cell style "plantuml=1" — when a cell has this style,
-//   draw.io renders the cell's VALUE as PlantUML code using its built-in renderer.
-//   We encode the full mxGraphModel XML into the ?xml= query param.
-//   draw.io reads it on load and renders the diagram immediately — no plugin needed.
+// Build a draw.io URL with the PlantUML source embedded as a native PlantUML cell
 function buildDrawioUrl(plantuml) {
-    // XML-escape the PlantUML so it is safe inside an XML attribute value
     const safe = plantuml
         .replace(/&/g, "&amp;")
         .replace(/"/g, "&quot;")
@@ -43,8 +36,6 @@ function buildDrawioUrl(plantuml) {
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;");
 
-    // The cell value IS the PlantUML source. The style "plantuml=1" tells
-    // draw.io to render it as a PlantUML diagram shape.
     const xml =
         `<mxGraphModel><root>` +
         `<mxCell id="0"/>` +
@@ -59,12 +50,29 @@ function buildDrawioUrl(plantuml) {
     return `https://app.diagrams.net/?splash=0&xml=${encodeURIComponent(xml)}`;
 }
 
-const PLANTUML_PROMPT = `You are a PlantUML expert. Convert the workflow below into a PlantUML UML Activity Diagram (beta syntax) — a single vertical flow with decision diamonds and merge points, like a classic flowchart.
+// ─── STEP 1 PROMPT: Extract workflow from messy input ────────────────────────
+// Accepts anything: Slack conversations, bullet points, paragraphs, mixed text.
+// Returns ONLY a clean, structured workflow — no chit-chat, no unrelated content.
+const EXTRACT_PROMPT = `You are a business analyst. Your job is to read the input below — which may be a Slack conversation, meeting notes, bullet points, or a mix of relevant and irrelevant content — and extract ONLY the workflow or process steps described.
+
+OUTPUT FORMAT (strict):
+- Return a titled, numbered list of workflow steps
+- Each step must be a clear action (verb + object), e.g. "User submits invoice"
+- Include decision points as: DECISION: <condition> → YES: <action> / NO: <action>
+- Ignore: greetings, reactions, off-topic chat, timestamps, usernames, emoji-only messages, jokes, side discussions
+- If no clear workflow is found, reply with exactly: NO_WORKFLOW_FOUND
+- Do NOT include any explanation, preamble, or markdown — output ONLY the structured workflow list
+
+Input:
+`;
+
+// ─── STEP 2 PROMPT: Convert clean workflow to PlantUML ───────────────────────
+const PLANTUML_PROMPT = `You are a PlantUML expert. Convert the structured workflow below into a PlantUML UML Activity Diagram (beta syntax) — a single vertical flow with decision diamonds and merge points, like a classic flowchart.
 
 STRICT RULES:
 - Start with @startuml and end with @enduml
 - Add a title using: title <Workflow Title>
-- Add these skinparam lines after @startuml:
+- Add these skinparam lines:
     skinparam backgroundColor #FEFEFE
     skinparam activityBackgroundColor #FFFFFF
     skinparam activityBorderColor #555555
@@ -73,17 +81,15 @@ STRICT RULES:
     skinparam arrowColor #333333
     skinparam roundcorner 10
 - Use start for the initial filled circle
-- Use stop for the final filled circle (end node)
-- Use :Action label; for every process step (rounded rectangle, ends with semicolon)
-- Use if (condition?) then (Yes) for decision diamonds, with else (No) and endif
-- After branching paths rejoin, PlantUML auto-merges after endif — just continue the flow
+- Use stop for the final filled circle
+- Use :Action label; for every process step (ends with semicolon)
+- Use if (condition?) then (Yes) ... else (No) ... endif for decisions
 - Keep the entire flow in ONE single column — NO swimlanes, NO | Actor | syntax
-- Do NOT use sequence diagram syntax (no participant, activate, ->)
-- Do NOT use swimlanes or | pipes |
-- Do NOT wrap output in markdown fences, backticks, or any explanation
+- Do NOT use sequence diagram syntax
+- Do NOT wrap output in markdown fences or backticks
 - Output ONLY raw PlantUML code
 
-Workflow to convert:
+Workflow:
 `;
 
 app.post("/slack/bpmn", async (req, res) => {
@@ -95,45 +101,70 @@ app.post("/slack/bpmn", async (req, res) => {
     if (!ALLOWED_USERS.includes(userId)) {
         return res.json({
             response_type: "ephemeral",
-            text: "You are not allowed to use this command."
+            text: "⛔ You are not allowed to use this command."
         });
     }
 
     // 2. Immediate ACK to avoid Slack 3s timeout
     res.json({
         response_type: "ephemeral",
-        text: "Generating activity diagram..."
+        text: "⏳ Analysing input and generating diagram..."
     });
 
-    // 3. Async Claude call
     try {
-        const result = await anthropic.messages.create({
+        // ── STEP 1: Extract the workflow from raw input ──────────────────────
+        const extractResult = await anthropic.messages.create({
             model: "claude-haiku-4-5-20251001",
-            max_tokens: 2000,
-            messages: [{ role: "user", content: PLANTUML_PROMPT + userText }]
+            max_tokens: 1000,
+            messages: [{ role: "user", content: EXTRACT_PROMPT + userText }]
         });
 
-        // Strip any markdown fences Claude may have added despite instructions
-        const plantuml = result.content[0].text
+        const extractedWorkflow = extractResult.content[0].text.trim();
+
+        // If no workflow found, tell the user clearly
+        if (extractedWorkflow === "NO_WORKFLOW_FOUND") {
+            await axios.post(responseUrl, {
+                response_type: "ephemeral",
+                text: "⚠️ I couldn't find a workflow in your input. Please describe the process steps you want to diagram, e.g.:\n> `/bpmn User submits invoice → Finance reviews → Approved? Yes: pay / No: reject`"
+            });
+            return;
+        }
+
+        // ── STEP 2: Generate PlantUML from clean workflow ────────────────────
+        const plantUmlResult = await anthropic.messages.create({
+            model: "claude-haiku-4-5-20251001",
+            max_tokens: 2000,
+            messages: [{ role: "user", content: PLANTUML_PROMPT + extractedWorkflow }]
+        });
+
+        const plantuml = plantUmlResult.content[0].text
             .trim()
             .replace(/^```[a-z]*\n?/i, "")
             .replace(/```\s*$/i, "")
             .trim();
 
-        // 1. PlantUML PNG — shown as preview image inside Slack
+        // ── Build URLs ───────────────────────────────────────────────────────
         const encoded = encodePlantUML(plantuml);
         const imageUrl = `https://www.plantuml.com/plantuml/png/${encoded}`;
-
-        // 2. draw.io URL — opens draw.io with the diagram pre-loaded as a PlantUML shape
         const drawioUrl = buildDrawioUrl(plantuml);
 
-        // Send result back to Slack
+        // ── Send result to Slack ─────────────────────────────────────────────
         await axios.post(responseUrl, {
             response_type: "in_channel",
             blocks: [
                 {
                     type: "section",
-                    text: { type: "mrkdwn", text: "*Your Activity Diagram:*" }
+                    text: {
+                        type: "mrkdwn",
+                        text: "*📋 Extracted workflow:*\n```" + extractedWorkflow + "```"
+                    }
+                },
+                {
+                    type: "divider"
+                },
+                {
+                    type: "section",
+                    text: { type: "mrkdwn", text: "*📊 Activity Diagram:*" }
                 },
                 {
                     type: "image",
@@ -144,26 +175,27 @@ app.post("/slack/bpmn", async (req, res) => {
                     type: "section",
                     text: {
                         type: "mrkdwn",
-                        text: `*Edit in draw\.io:*\n${drawioUrl}`
+                        text: `*✏️ Edit in draw\.io:*\n${drawioUrl}`
                     }
                 },
                 {
                     type: "section",
                     text: {
                         type: "mrkdwn",
-                        text: `*PlantUML source:*\n\`\`\`${plantuml}\`\`\``
+                        text: `*🌿 PlantUML source:*\n\`\`\`${plantuml}\`\`\``
                     }
                 }
             ]
         });
+
     } catch (err) {
         console.error(err);
         await axios.post(responseUrl, {
             response_type: "ephemeral",
-            text: "Error generating diagram. Please try again."
+            text: "❌ Error generating diagram. Please try again."
         });
     }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`BPMN bot listening on port ${PORT}`));
+app.listen(PORT, () => console.log(`✅ BPMN bot listening on port ${PORT}`));
