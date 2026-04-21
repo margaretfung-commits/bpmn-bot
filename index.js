@@ -54,12 +54,29 @@ app.post("/slack/bpmn", async (req, res) => {
             messages: [
                 {
                     role: "user",
-                    content: `You are a BPMN expert. Return ONLY valid PlantUML BPMN code, no explanation, no markdown fences.\n\nConvert this workflow to PlantUML:\n${userText}`
+                    content: `You are a BPMN expert. Convert the workflow below into a PlantUML activity diagram using swimlane syntax.
+
+STRICT RULES:
+- Start with @startuml, end with @enduml
+- Use | SwimlaneActorName | to define swimlane columns for each participant
+- Use :Action label; for each step
+- Use if / elseif / else / endif for decisions
+- Use -> for flow arrows between swimlanes
+- Do NOT use participant, sequence, or @startbpmn syntax
+- Do NOT include any markdown fences, backticks, or explanation — output ONLY the raw PlantUML code
+
+Workflow to convert:
+${userText}`
                 }
             ]
         });
 
-        const plantuml = result.content[0].text.trim();
+        // Strip any markdown fences Claude may have added despite instructions
+        const plantuml = result.content[0].text
+            .trim()
+            .replace(/^```[a-z]*\n?/i, "")
+            .replace(/```$/i, "")
+            .trim();
         const encoded = encodePlantUML(plantuml);
         const imageUrl = `https://www.plantuml.com/plantuml/png/${encoded}`;
 
