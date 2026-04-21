@@ -27,6 +27,38 @@ function encodePlantUML(text) {
     return result;
 }
 
+// Build a draw.io URL that pre-loads the diagram.
+//
+// How draw.io PlantUML embedding works:
+//   draw.io has a native cell style "plantuml=1" — when a cell has this style,
+//   draw.io renders the cell's VALUE as PlantUML code using its built-in renderer.
+//   We encode the full mxGraphModel XML into the ?xml= query param.
+//   draw.io reads it on load and renders the diagram immediately — no plugin needed.
+function buildDrawioUrl(plantuml) {
+    // XML-escape the PlantUML so it is safe inside an XML attribute value
+    const safe = plantuml
+        .replace(/&/g, "&amp;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&apos;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+
+    // The cell value IS the PlantUML source. The style "plantuml=1" tells
+    // draw.io to render it as a PlantUML diagram shape.
+    const xml =
+        `<mxGraphModel><root>` +
+        `<mxCell id="0"/>` +
+        `<mxCell id="1" parent="0"/>` +
+        `<mxCell id="2" value="${safe}" ` +
+        `style="shape=mxgraph.plantuml.activity;plantuml=1;whiteSpace=wrap;html=1;" ` +
+        `vertex="1" parent="1">` +
+        `<mxGeometry x="20" y="20" width="800" height="1100" as="geometry"/>` +
+        `</mxCell>` +
+        `</root></mxGraphModel>`;
+
+    return `https://app.diagrams.net/?splash=0&xml=${encodeURIComponent(xml)}`;
+}
+
 const PLANTUML_PROMPT = `You are a PlantUML expert. Convert the workflow below into a PlantUML UML Activity Diagram (beta syntax) — a single vertical flow with decision diamonds and merge points, like a classic flowchart.
 
 STRICT RULES:
@@ -50,29 +82,6 @@ STRICT RULES:
 - Do NOT use swimlanes or | pipes |
 - Do NOT wrap output in markdown fences, backticks, or any explanation
 - Output ONLY raw PlantUML code
-
-Example of correct structure:
-@startuml
-skinparam backgroundColor #FEFEFE
-skinparam activityBackgroundColor #FFFFFF
-skinparam activityBorderColor #555555
-skinparam activityDiamondBackgroundColor #FFFFFF
-skinparam activityDiamondBorderColor #555555
-skinparam arrowColor #333333
-skinparam roundcorner 10
-title My Workflow
-start
-:First step;
-if (Condition?) then (Yes)
-  :Handle Yes case;
-else (No)
-  :Handle No case;
-  stop
-endif
-:Merged step continues;
-:Final step;
-stop
-@enduml
 
 Workflow to convert:
 `;
@@ -101,12 +110,7 @@ app.post("/slack/bpmn", async (req, res) => {
         const result = await anthropic.messages.create({
             model: "claude-haiku-4-5-20251001",
             max_tokens: 2000,
-            messages: [
-                {
-                    role: "user",
-                    content: PLANTUML_PROMPT + userText
-                }
-            ]
+            messages: [{ role: "user", content: PLANTUML_PROMPT + userText }]
         });
 
         // Strip any markdown fences Claude may have added despite instructions
@@ -116,23 +120,39 @@ app.post("/slack/bpmn", async (req, res) => {
             .replace(/```\s*$/i, "")
             .trim();
 
+        // 1. PlantUML PNG — shown as preview image inside Slack
         const encoded = encodePlantUML(plantuml);
         const imageUrl = `https://www.plantuml.com/plantuml/png/${encoded}`;
 
-        // draw.io: open with PlantUML XML plugin pre-loaded
-        const drawioUrl = `https://app.diagrams.net/?splash=0&p=plantuml&src=${encodeURIComponent(imageUrl)}`;
+        // 2. draw.io URL — opens draw.io with the diagram pre-loaded as a PlantUML shape
+        const drawioUrl = buildDrawioUrl(plantuml);
 
         // Send result back to Slack
         await axios.post(responseUrl, {
             response_type: "in_channel",
-            text: "Your Activity Diagram:",
-            attachments: [
+            blocks: [
                 {
-                    image_url: imageUrl,
-                    text: "```\n" + plantuml + "\n```"
+                    type: "section",
+                    text: { type: "mrkdwn", text: "*Your Activity Diagram:*" }
                 },
                 {
-                    text: `Open in draw.io: ${drawioUrl}`
+                    type: "image",
+                    image_url: imageUrl,
+                    alt_text: "Activity diagram"
+                },
+                {
+                    type: "section",
+                    text: {
+                        type: "mrkdwn",
+                        text: `*Edit in draw\.io:*\n${drawioUrl}`
+                    }
+                },
+                {
+                    type: "section",
+                    text: {
+                        type: "mrkdwn",
+                        text: `*PlantUML source:*\n\`\`\`${plantuml}\`\`\``
+                    }
                 }
             ]
         });
