@@ -27,46 +27,84 @@ function encodePlantUML(text) {
     return result;
 }
 
+const PLANTUML_PROMPT = `You are a PlantUML expert. Convert the workflow below into a PlantUML UML Activity Diagram (beta syntax) — a single vertical flow with decision diamonds and merge points, like a classic flowchart.
+
+STRICT RULES:
+- Start with @startuml and end with @enduml
+- Add a title using: title <Workflow Title>
+- Add these skinparam lines after @startuml:
+    skinparam backgroundColor #FEFEFE
+    skinparam activityBackgroundColor #FFFFFF
+    skinparam activityBorderColor #555555
+    skinparam activityDiamondBackgroundColor #FFFFFF
+    skinparam activityDiamondBorderColor #555555
+    skinparam arrowColor #333333
+    skinparam roundcorner 10
+- Use start for the initial filled circle
+- Use stop for the final filled circle (end node)
+- Use :Action label; for every process step (rounded rectangle, ends with semicolon)
+- Use if (condition?) then (Yes) for decision diamonds, with else (No) and endif
+- After branching paths rejoin, PlantUML auto-merges after endif — just continue the flow
+- Keep the entire flow in ONE single column — NO swimlanes, NO | Actor | syntax
+- Do NOT use sequence diagram syntax (no participant, activate, ->)
+- Do NOT use swimlanes or | pipes |
+- Do NOT wrap output in markdown fences, backticks, or any explanation
+- Output ONLY raw PlantUML code
+
+Example of correct structure:
+@startuml
+skinparam backgroundColor #FEFEFE
+skinparam activityBackgroundColor #FFFFFF
+skinparam activityBorderColor #555555
+skinparam activityDiamondBackgroundColor #FFFFFF
+skinparam activityDiamondBorderColor #555555
+skinparam arrowColor #333333
+skinparam roundcorner 10
+title My Workflow
+start
+:First step;
+if (Condition?) then (Yes)
+  :Handle Yes case;
+else (No)
+  :Handle No case;
+  stop
+endif
+:Merged step continues;
+:Final step;
+stop
+@enduml
+
+Workflow to convert:
+`;
+
 app.post("/slack/bpmn", async (req, res) => {
     const userText = req.body.text;
     const userId = req.body.user_id;
     const responseUrl = req.body.response_url;
 
-    // 🔐 1. Whitelist check
+    // 1. Whitelist check
     if (!ALLOWED_USERS.includes(userId)) {
         return res.json({
             response_type: "ephemeral",
-            text: "⛔ You are not allowed to use this command."
+            text: "You are not allowed to use this command."
         });
     }
 
-    // ⏱️ 2. Immediate ACK to avoid Slack 3s timeout
+    // 2. Immediate ACK to avoid Slack 3s timeout
     res.json({
         response_type: "ephemeral",
-        text: "⏳ Generating BPMN diagram..."
+        text: "Generating activity diagram..."
     });
 
-    // ⚡ 3. Async Claude call
+    // 3. Async Claude call
     try {
         const result = await anthropic.messages.create({
             model: "claude-haiku-4-5-20251001",
-            max_tokens: 1000,
+            max_tokens: 2000,
             messages: [
                 {
                     role: "user",
-                    content: `You are a BPMN expert. Convert the workflow below into a PlantUML activity diagram using swimlane syntax.
-
-STRICT RULES:
-- Start with @startuml, end with @enduml
-- Use | SwimlaneActorName | to define swimlane columns for each participant
-- Use :Action label; for each step
-- Use if / elseif / else / endif for decisions
-- Use -> for flow arrows between swimlanes
-- Do NOT use participant, sequence, or @startbpmn syntax
-- Do NOT include any markdown fences, backticks, or explanation — output ONLY the raw PlantUML code
-
-Workflow to convert:
-${userText}`
+                    content: PLANTUML_PROMPT + userText
                 }
             ]
         });
@@ -75,26 +113,26 @@ ${userText}`
         const plantuml = result.content[0].text
             .trim()
             .replace(/^```[a-z]*\n?/i, "")
-            .replace(/```$/i, "")
+            .replace(/```\s*$/i, "")
             .trim();
+
         const encoded = encodePlantUML(plantuml);
         const imageUrl = `https://www.plantuml.com/plantuml/png/${encoded}`;
 
-        // draw.io XML import URL (diagram encoded as XML)
-        const drawioXml = `<mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/><mxCell id="2" value="" style="shape=image;image=${imageUrl}" vertex="1" parent="1"><mxGeometry width="800" height="600" as="geometry"/></mxCell></root></mxGraphModel>`;
-        const drawioUrl = `https://app.diagrams.net/?splash=0&xml=${encodeURIComponent(drawioXml)}`;
+        // draw.io: open with PlantUML XML plugin pre-loaded
+        const drawioUrl = `https://app.diagrams.net/?splash=0&p=plantuml&src=${encodeURIComponent(imageUrl)}`;
 
-        // 📩 Send result back to Slack
+        // Send result back to Slack
         await axios.post(responseUrl, {
             response_type: "in_channel",
-            text: "📊 *Your BPMN Diagram:*",
+            text: "Your Activity Diagram:",
             attachments: [
                 {
                     image_url: imageUrl,
-                    text: `\`\`\`\n${plantuml}\n\`\`\``
+                    text: "```\n" + plantuml + "\n```"
                 },
                 {
-                    text: `🔗 <${drawioUrl}|Open in draw.io>`
+                    text: `Open in draw.io: ${drawioUrl}`
                 }
             ]
         });
@@ -102,10 +140,10 @@ ${userText}`
         console.error(err);
         await axios.post(responseUrl, {
             response_type: "ephemeral",
-            text: "❌ Error generating BPMN diagram. Please try again."
+            text: "Error generating diagram. Please try again."
         });
     }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`✅ BPMN bot listening on port ${PORT}`));
+app.listen(PORT, () => console.log(`BPMN bot listening on port ${PORT}`));
