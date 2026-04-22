@@ -4,7 +4,7 @@ const Anthropic = require("@anthropic-ai/sdk");
 const pako = require("pako");
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-const ALLOWED_USERS = ["U04ERCL1490"];
+const ALLOWED_USERS = ["U04ERCL1490", "U02QEU89WKG"];
 const app = express();
 app.use(express.urlencoded({ extended: true }));
 
